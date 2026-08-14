@@ -1,0 +1,8 @@
+services:
+  smtp2ntfy:
+    image: smtp2ntfy:local
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "2525"
