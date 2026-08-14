@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -122,7 +123,11 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 }
 
 func (s *session) Data(r io.Reader) error {
-	code, err := extractCode(r)
+	content, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	code, err := extractCode(bytes.NewReader(content))
 	if err != nil || code == "" || s.topic == "" {
 		return nil
 	}
@@ -146,7 +151,9 @@ func (b *backend) push(topic, code string) error {
 	req.Header.Set("Cache", "no")
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 
-	resp, err := b.client.Do(req)
+	client := *b.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

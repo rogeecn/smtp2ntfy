@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	stdsmtp "net/smtp"
+	"net/textproto"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,9 +89,28 @@ func TestSMTPRejectsInvalidRecipientsAndLargeMessages(t *testing.T) {
 	}
 	_ = client.Quit()
 
-	large := "From: sender@example.net\r\nTo: rogee@ipao.vip\r\n\r\n" + strings.Repeat("x", maxMessageBytes)
-	if err := stdsmtp.SendMail(addr, nil, "sender@example.net", []string{"rogee@ipao.vip"}, []byte(large)); err == nil {
-		t.Error("oversized message was accepted")
+	raw, err := textproto.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, _, err := raw.ReadResponse(220); err != nil {
+		t.Fatal(err)
+	}
+	command(t, raw, 250, "HELO test")
+	command(t, raw, 250, "MAIL FROM:<sender@example.net>") // Deliberately no SIZE parameter.
+	command(t, raw, 250, "RCPT TO:<rogee@ipao.vip>")
+	command(t, raw, 354, "DATA")
+	writer := raw.DotWriter()
+	large := "From: sender@example.net\r\nTo: rogee@ipao.vip\r\n\r\n" + strings.Repeat("x\r\n", maxMessageBytes/3)
+	if n, err := io.WriteString(writer, large); err != nil || n != len(large) {
+		t.Fatalf("write oversized message: wrote %d of %d bytes: %v", n, len(large), err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := raw.ReadResponse(552); err != nil {
+		t.Fatalf("oversized message was not rejected: %v", err)
 	}
 }
 
@@ -125,6 +146,27 @@ func TestNtfyFailureDoesNotFailSMTP(t *testing.T) {
 				t.Fatalf("SMTP returned ntfy failure: %v", err)
 			}
 		})
+	}
+}
+
+func TestNtfyRedirectDoesNotLeakCode(t *testing.T) {
+	var leaked atomic.Bool
+	leakTarget := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		leaked.Store(true)
+	}))
+	defer leakTarget.Close()
+	ntfy := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", leakTarget.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer ntfy.Close()
+
+	addr := startSMTP(t, testBackend(t, ntfy.URL, ntfy.Client()))
+	if err := stdsmtp.SendMail(addr, nil, "sender@example.net", []string{"rogee@ipao.vip"}, []byte(testMessage)); err != nil {
+		t.Fatalf("SMTP returned redirect failure: %v", err)
+	}
+	if leaked.Load() {
+		t.Fatal("verification code was sent to redirect target")
 	}
 }
 
@@ -213,4 +255,17 @@ func startSMTP(t *testing.T, backend *backend) string {
 		<-done
 	})
 	return listener.Addr().String()
+}
+
+func command(t *testing.T, conn *textproto.Conn, code int, line string) {
+	t.Helper()
+	id, err := conn.Cmd("%s", line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.StartResponse(id)
+	defer conn.EndResponse(id)
+	if _, _, err := conn.ReadResponse(code); err != nil {
+		t.Fatal(err)
+	}
 }
