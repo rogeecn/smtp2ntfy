@@ -2,7 +2,7 @@
 
 `smtp2ntfy` accepts verification emails over SMTP on a private container network, extracts the first independent six-digit code, and publishes it to an ntfy topic over HTTPS.
 
-For `ALLOWED_DOMAIN=ipao.vip` and `TOPIC_PREFIX=multica-`:
+With `ALLOWED_DOMAIN=ipao.vip` and the default topic template, mail to `rogee@ipao.vip` publishes here:
 
 ```text
 rogee@ipao.vip -> https://ntfy.example.com/multica-rogee
@@ -12,7 +12,7 @@ The local part is lowercased and must match `[a-z0-9_-]{1,48}`. Messages for ano
 
 ## Configure
 
-Copy the example and replace every placeholder:
+Copy the example and set your recipient domain, ntfy URL, and credentials.
 
 ```sh
 cp .env.example .env
@@ -22,13 +22,23 @@ cp .env.example .env
 | --- | --- | --- |
 | `LISTEN_ADDR` | `:2525` | Private SMTP listener |
 | `ALLOWED_DOMAIN` | required | The only accepted recipient domain |
-| `TOPIC_PREFIX` | `multica-` | Prefix before the lowercased local part |
+| `TOPIC_TMPL` | `multica-{recipient}` | Fixed ntfy topic or a template with SMTP envelope fields |
 | `NTFY_BASE_URL` | required | HTTPS ntfy base URL; credentials in URLs are rejected |
 | `NTFY_USERNAME` | required | ntfy HTTP Basic Auth username |
 | `NTFY_PASSWORD` | required | ntfy HTTP Basic Auth password |
 | `HTTP_TIMEOUT` | `3s` | Positive timeout for one publish attempt |
 
-Start it with:
+### Topic templates
+
+- `TOPIC_TMPL=all-codes` publishes every extracted code to `all-codes`.
+- `TOPIC_TMPL=multica-{sender}` publishes mail from `Service@example.net` to `multica-service`. `{sender}` uses the local part of the SMTP envelope sender (`MAIL FROM`), converted to lowercase.
+- `TOPIC_TMPL=multica-{recipient}` publishes mail to `Rogee@ipao.vip` to `multica-rogee`. `{recipient}` uses the local part of the SMTP envelope recipient (`RCPT TO`), converted to lowercase.
+
+You can combine and repeat placeholders. Topics must match `[a-z0-9_-]{1,64}`. The service rejects an invalid template at startup. SMTP returns `550` if the template uses `{sender}` and `MAIL FROM` is empty, or if the rendered topic is invalid.
+
+When upgrading, replace `TOPIC_PREFIX=<prefix>` with `TOPIC_TMPL=<prefix>{recipient}` to keep the same topics. The service refuses to start when only `TOPIC_PREFIX` is set and prints the equivalent `TOPIC_TMPL` setting. When both variables are set, `TOPIC_TMPL` takes precedence. An empty `TOPIC_TMPL` uses the default template.
+
+### Start the service
 
 ```sh
 docker compose up --build -d
@@ -44,7 +54,7 @@ SMTP_PASSWORD=
 SMTP_FROM_EMAIL=noreply@ipao.vip
 ```
 
-The login address must use `ALLOWED_DOMAIN`. For example, mail to `rogee@ipao.vip` publishes the extracted code to topic `multica-rogee`.
+The login address must use `ALLOWED_DOMAIN`.
 
 ## Security and delivery boundary
 
