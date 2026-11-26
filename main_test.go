@@ -25,33 +25,57 @@ const testMessage = "From: sender@example.net\r\n" +
 	"<p>Your code is <strong>12=33=34=35=36</strong>.</p>\r\n"
 
 func TestSMTPPublishesCode(t *testing.T) {
-	var called bool
-	ntfy := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		if r.URL.Path != "/multica-rogee" {
-			t.Errorf("path = %q", r.URL.Path)
-		}
-		username, password, ok := r.BasicAuth()
-		if !ok || username != "ntfy-user" || password != "ntfy-pass" {
-			t.Errorf("BasicAuth() = %q, %q, %v", username, password, ok)
-		}
-		if got := r.Header.Get("Cache"); got != "no" {
-			t.Errorf("Cache = %q", got)
-		}
-		body, _ := io.ReadAll(r.Body)
-		if string(body) != "123456" {
-			t.Errorf("body = %q", body)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ntfy.Close()
+	for _, test := range []struct {
+		name  string
+		tmpl  string
+		from  string
+		topic string
+	}{
+		{name: "fixed", tmpl: "all-codes", from: "", topic: "all-codes"},
+		{name: "recipient", tmpl: "multica-{recipient}", from: "first.last@example.net", topic: "multica-rogee"},
+		{name: "sender", tmpl: "multica-{sender}", from: "Service@example.net", topic: "multica-service"},
+		{name: "both", tmpl: "{sender}-{recipient}-{sender}", from: "Service@example.net", topic: "service-rogee-service"},
+		{name: "missing sender", tmpl: "multica-{sender}", from: ""},
+		{name: "invalid sender", tmpl: "multica-{sender}", from: "first.last@example.net"},
+		{name: "too long after rendering", tmpl: "{sender}-{sender}", from: strings.Repeat("a", 32) + "@example.net"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var called atomic.Bool
+			ntfy := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called.Store(true)
+				if r.URL.Path != "/"+test.topic {
+					t.Errorf("path = %q, want /%s", r.URL.Path, test.topic)
+				}
+				username, password, ok := r.BasicAuth()
+				if !ok || username != "ntfy-user" || password != "ntfy-pass" {
+					t.Errorf("BasicAuth() = %q, %q, %v", username, password, ok)
+				}
+				if got := r.Header.Get("Cache"); got != "no" {
+					t.Errorf("Cache = %q", got)
+				}
+				body, _ := io.ReadAll(r.Body)
+				if string(body) != "123456" {
+					t.Errorf("body = %q", body)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer ntfy.Close()
 
-	addr := startSMTP(t, testBackend(t, ntfy.URL, ntfy.Client()))
-	if err := stdsmtp.SendMail(addr, nil, "sender@example.net", []string{"ROGEE@ipao.vip"}, []byte(testMessage)); err != nil {
-		t.Fatal(err)
-	}
-	if !called {
-		t.Fatal("ntfy was not called")
+			be := testBackend(t, ntfy.URL, ntfy.Client())
+			be.topicTmpl = test.tmpl
+			addr := startSMTP(t, be)
+			err := stdsmtp.SendMail(addr, nil, test.from, []string{"ROGEE@ipao.vip"}, []byte(testMessage))
+			if test.topic == "" {
+				if smtpErr, ok := err.(*textproto.Error); !ok || smtpErr.Code != 550 {
+					t.Fatalf("SMTP error = %v, want 550", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if called.Load() != (test.topic != "") {
+				t.Fatalf("ntfy called = %v, topic = %q", called.Load(), test.topic)
+			}
+		})
 	}
 }
 
@@ -189,13 +213,32 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("NTFY_USERNAME", "user")
 	t.Setenv("NTFY_PASSWORD", "pass")
 	t.Setenv("HTTP_TIMEOUT", "2s")
+	t.Setenv("TOPIC_TMPL", "")
 
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.allowedDomain != "ipao.vip" || cfg.topicPrefix != "multica-" || cfg.timeout != 2*time.Second {
+	if cfg.allowedDomain != "ipao.vip" || cfg.topicTmpl != "multica-{recipient}" || cfg.timeout != 2*time.Second {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+
+	for _, tmpl := range []string{strings.Repeat("a", 64), "multica-{sender}-{recipient}"} {
+		t.Run(tmpl, func(t *testing.T) {
+			t.Setenv("TOPIC_TMPL", tmpl)
+			cfg, err := loadConfig()
+			if err != nil || cfg.topicTmpl != tmpl {
+				t.Fatalf("TOPIC_TMPL = %q, error = %v, want %q", cfg.topicTmpl, err, tmpl)
+			}
+		})
+	}
+	for _, tmpl := range []string{"multica-{unknown}", "{sender", "bad/path", "MixedCase", strings.Repeat("a", 65)} {
+		t.Run(tmpl, func(t *testing.T) {
+			t.Setenv("TOPIC_TMPL", tmpl)
+			if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "TOPIC_TMPL") {
+				t.Fatalf("error = %v, want a TOPIC_TMPL error", err)
+			}
+		})
 	}
 
 	t.Setenv("NTFY_BASE_URL", "http://ntfy.example.com")
@@ -223,13 +266,13 @@ func testBackend(t *testing.T, rawURL string, client *http.Client) *backend {
 		t.Fatal(err)
 	}
 	return &backend{
-		domain:      "ipao.vip",
-		topicPrefix: "multica-",
-		baseURL:     baseURL,
-		username:    "ntfy-user",
-		password:    "ntfy-pass",
-		client:      client,
-		logger:      log.New(io.Discard, "", 0),
+		domain:    "ipao.vip",
+		topicTmpl: "multica-{recipient}",
+		baseURL:   baseURL,
+		username:  "ntfy-user",
+		password:  "ntfy-pass",
+		client:    client,
+		logger:    log.New(io.Discard, "", 0),
 	}
 }
 

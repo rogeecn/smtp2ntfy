@@ -34,7 +34,7 @@ var (
 type config struct {
 	listenAddr    string
 	allowedDomain string
-	topicPrefix   string
+	topicTmpl     string
 	ntfyURL       *url.URL
 	username      string
 	password      string
@@ -45,7 +45,7 @@ func loadConfig() (config, error) {
 	cfg := config{
 		listenAddr:    envOr("LISTEN_ADDR", ":2525"),
 		allowedDomain: strings.ToLower(strings.TrimSpace(os.Getenv("ALLOWED_DOMAIN"))),
-		topicPrefix:   envOr("TOPIC_PREFIX", "multica-"),
+		topicTmpl:     envOr("TOPIC_TMPL", "multica-{recipient}"),
 		username:      os.Getenv("NTFY_USERNAME"),
 		password:      os.Getenv("NTFY_PASSWORD"),
 	}
@@ -53,8 +53,8 @@ func loadConfig() (config, error) {
 	if cfg.allowedDomain == "" || strings.ContainsAny(cfg.allowedDomain, "@/ ") {
 		return config{}, errors.New("ALLOWED_DOMAIN must be a single domain")
 	}
-	if cfg.topicPrefix == "" || !topicPattern.MatchString(cfg.topicPrefix+"a") {
-		return config{}, errors.New("TOPIC_PREFIX must contain only lowercase letters, digits, underscores, or hyphens")
+	if !topicPattern.MatchString(renderTopic(cfg.topicTmpl, "a", "a")) {
+		return config{}, errors.New("TOPIC_TMPL must use only lowercase letters, digits, underscores, hyphens, {sender}, or {recipient} and allow a 1-64 character topic")
 	}
 	if cfg.username == "" || cfg.password == "" {
 		return config{}, errors.New("NTFY_USERNAME and NTFY_PASSWORD are required")
@@ -80,14 +80,18 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+func renderTopic(tmpl, sender, recipient string) string {
+	return strings.NewReplacer("{sender}", sender, "{recipient}", recipient).Replace(tmpl)
+}
+
 type backend struct {
-	domain      string
-	topicPrefix string
-	baseURL     *url.URL
-	username    string
-	password    string
-	client      *http.Client
-	logger      *log.Logger
+	domain    string
+	topicTmpl string
+	baseURL   *url.URL
+	username  string
+	password  string
+	client    *http.Client
+	logger    *log.Logger
 }
 
 func (b *backend) NewSession(*smtp.Conn) (smtp.Session, error) {
@@ -96,11 +100,15 @@ func (b *backend) NewSession(*smtp.Conn) (smtp.Session, error) {
 
 type session struct {
 	backend *backend
+	sender  string
 	topic   string
 }
 
-func (s *session) Mail(string, *smtp.MailOptions) error {
-	s.topic = ""
+func (s *session) Mail(from string, _ *smtp.MailOptions) error {
+	s.Reset()
+	if at := strings.LastIndexByte(from, '@'); at >= 0 {
+		s.sender = strings.ToLower(from[:at])
+	}
 	return nil
 }
 
@@ -114,9 +122,12 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 	if !ok || strings.Contains(domain, "@") || !strings.EqualFold(domain, s.backend.domain) || !localPartPattern.MatchString(local) {
 		return &smtp.SMTPError{Code: 550, Message: "recipient rejected"}
 	}
-	topic := s.backend.topicPrefix + local
+	if s.sender == "" && strings.Contains(s.backend.topicTmpl, "{sender}") {
+		return &smtp.SMTPError{Code: 550, Message: "sender required by TOPIC_TMPL"}
+	}
+	topic := renderTopic(s.backend.topicTmpl, s.sender, local)
 	if !topicPattern.MatchString(topic) {
-		return &smtp.SMTPError{Code: 550, Message: "recipient rejected"}
+		return &smtp.SMTPError{Code: 550, Message: "invalid rendered topic"}
 	}
 	s.topic = topic
 	return nil
@@ -137,7 +148,11 @@ func (s *session) Data(r io.Reader) error {
 	return nil
 }
 
-func (s *session) Reset()        { s.topic = "" }
+func (s *session) Reset() {
+	s.sender = ""
+	s.topic = ""
+}
+
 func (s *session) Logout() error { return nil }
 
 func (b *backend) push(topic, code string) error {
@@ -233,13 +248,13 @@ func run() error {
 	}
 	logger := log.New(os.Stderr, "smtp2ntfy: ", log.LstdFlags)
 	be := &backend{
-		domain:      cfg.allowedDomain,
-		topicPrefix: cfg.topicPrefix,
-		baseURL:     cfg.ntfyURL,
-		username:    cfg.username,
-		password:    cfg.password,
-		client:      &http.Client{Timeout: cfg.timeout},
-		logger:      logger,
+		domain:    cfg.allowedDomain,
+		topicTmpl: cfg.topicTmpl,
+		baseURL:   cfg.ntfyURL,
+		username:  cfg.username,
+		password:  cfg.password,
+		client:    &http.Client{Timeout: cfg.timeout},
+		logger:    logger,
 	}
 	server := smtp.NewServer(be)
 	server.Addr = cfg.listenAddr
