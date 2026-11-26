@@ -9,6 +9,7 @@ import (
 	stdsmtp "net/smtp"
 	"net/textproto"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -213,7 +214,12 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("NTFY_USERNAME", "user")
 	t.Setenv("NTFY_PASSWORD", "pass")
 	t.Setenv("HTTP_TIMEOUT", "2s")
-	t.Setenv("TOPIC_TMPL", "")
+	for _, key := range []string{"TOPIC_PREFIX", "TOPIC_TMPL"} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -222,6 +228,30 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.allowedDomain != "ipao.vip" || cfg.topicTmpl != "multica-{recipient}" || cfg.timeout != 2*time.Second {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
+
+	t.Run("legacy topic prefix requires migration", func(t *testing.T) {
+		for prefix, want := range map[string]string{
+			"private-": "TOPIC_TMPL=private-{recipient}",
+			"":         "TOPIC_TMPL=multica-{recipient}",
+		} {
+			t.Setenv("TOPIC_PREFIX", prefix)
+			_, err := loadConfig()
+			if err == nil || !strings.Contains(err.Error(), "TOPIC_PREFIX has been removed") || !strings.Contains(err.Error(), want) {
+				t.Errorf("TOPIC_PREFIX=%q: error = %v, want migration to %s", prefix, err, want)
+			}
+		}
+	})
+
+	t.Run("topic template takes precedence", func(t *testing.T) {
+		t.Setenv("TOPIC_PREFIX", "private-")
+		for tmpl, want := range map[string]string{"all-codes": "all-codes", "": "multica-{recipient}"} {
+			t.Setenv("TOPIC_TMPL", tmpl)
+			cfg, err := loadConfig()
+			if err != nil || cfg.topicTmpl != want {
+				t.Errorf("TOPIC_TMPL=%q: loaded %q, error = %v, want %q", tmpl, cfg.topicTmpl, err, want)
+			}
+		}
+	})
 
 	for _, tmpl := range []string{strings.Repeat("a", 64), "multica-{sender}-{recipient}"} {
 		t.Run(tmpl, func(t *testing.T) {

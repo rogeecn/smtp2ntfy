@@ -36,7 +36,7 @@ cp .env.example .env
 
 You can combine and repeat placeholders. Topics must match `[a-z0-9_-]{1,64}`. The service rejects an invalid template at startup. SMTP returns `550` if the template uses `{sender}` and `MAIL FROM` is empty, or if the rendered topic is invalid.
 
-When upgrading, replace `TOPIC_PREFIX=<prefix>` with `TOPIC_TMPL=<prefix>{recipient}` to keep the same topics.
+When upgrading, replace `TOPIC_PREFIX=<prefix>` with `TOPIC_TMPL=<prefix>{recipient}` to keep the same topics. The service refuses to start when only `TOPIC_PREFIX` is set and prints the equivalent `TOPIC_TMPL` setting. When both variables are set, `TOPIC_TMPL` takes precedence. An empty `TOPIC_TMPL` uses the default template.
 
 ### Start the service
 

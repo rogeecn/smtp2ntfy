@@ -50,6 +50,15 @@ func loadConfig() (config, error) {
 		password:      os.Getenv("NTFY_PASSWORD"),
 	}
 
+	_, topicTmplSet := os.LookupEnv("TOPIC_TMPL")
+	if prefix, legacySet := os.LookupEnv("TOPIC_PREFIX"); legacySet && !topicTmplSet {
+		replacement := cfg.topicTmpl
+		if prefix != "" {
+			replacement = prefix + "{recipient}"
+		}
+		return config{}, fmt.Errorf("TOPIC_PREFIX has been removed. Use TOPIC_TMPL=%s", replacement)
+	}
+
 	if cfg.allowedDomain == "" || strings.ContainsAny(cfg.allowedDomain, "@/ ") {
 		return config{}, errors.New("ALLOWED_DOMAIN must be a single domain")
 	}
